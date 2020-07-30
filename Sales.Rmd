@@ -1,0 +1,700 @@
+---
+title: "Forecasting Sales"
+author: "Jennifer Brosnahan"
+date: "7/12/2020"
+output: 
+  html_document: 
+    keep_md: yes
+---
+
+## The purpose of this project is to predict sales for certain products of interest (PCs, Laptops, Netbooks, Smartphones) for an Electronics Retailer and assess the impact 'Service Reviews' and 'Customer Reviews' have on sales.
+
+## The following shows my entire data and machine learning process.
+
+## To see sales predictions only...simply scroll all the way down.
+
+### Loading packages
+```{r Loading packages, message=FALSE}
+library(tidyverse)
+library(caret)
+library(ggplot2)
+library(corrplot)
+library(openxlsx)
+library(h2o)
+library(kableExtra)
+```
+
+### Importing data (path has been hidden)
+```{r, include=FALSE}
+existing <- read.csv(file.path('C:/Users/jlbro/OneDrive/C3T3', 'existing.csv'), 
+                     stringsAsFactors = TRUE)
+```
+
+### Checking structure
+```{r}
+str(existing)
+```
+
+### We can see that one feature of interest, 'Product Type,' is a factor with 12 categorical values (12 different product types, such as 'Accessories,' 'Laptops,' etc.). Because regression algorithms can easily misinterpret categorical variables with more than 2 values, we will 'dummify' this feature for regression modeling to binarize the values.
+```{r}
+existingDummy <- dummyVars(' ~ .', data = existing)
+existing2 <- data.frame(predict(existingDummy, newdata = existing))
+```
+
+### Checking structure again
+```{r}
+str(existing2)
+```
+
+### Checking summary for descriptive statistics and NAs
+```{r}
+summary(existing2)
+```
+### Summary reveals 15 NA's for 'BestSellersRank' 
+
+### Correlation matrix of all variables
+```{r}
+corrData <- cor(existing2)
+```
+
+### Exporting correlation to excel
+```{r}
+write.xlsx(corrData, file = "corrData.xlsx", row.names=TRUE)
+write.xlsx(existing2, file = 'existing2.xlsx')
+```
+
+### After printing excel matrix, I was able to see that 'BestSellersRank,' the only variable with missing data, has .05 correlation with our target variable. Because it contains NAs and has poor correlation, I will remove 'BestSellersRank' from data frame.
+```{r}
+existing2$BestSellersRank <- NULL
+```
+
+### Viewing correlation heatmap. It is unreadable with so many variables, so I will clean this up by removing irrelevant variables in next step.
+```{r}
+corrplot(corrData)
+```
+
+### Based on excel correlation file, I am removing variables with correlation lower than .18 to target variable 'volume.' I also noticed '5StarReviews' has a perfect correlation of 1 to our target variable, 'Volume.' A perfect correlation to target variable risks feature bias and overfitting, thus I will remove from data frame.
+```{r}
+existing3 <- subset(existing2, select = -c(1:4, 8:9, 11:12, 15, 24:27))
+str(existing3)
+```
+
+## EDA
+
+### Viewing correlation heatmap
+```{r}
+corrData3 <- cor(existing3)
+corrplot(corrData3)
+```
+
+### Enhancing the correlation heatmap. As you can see, x4Star, x3Star, x2Star, and PositiveService Review have highest correlation to target variable 'Volume.'
+```{r}
+color <- colorRampPalette(c('#BB4444','#EE9988','#FFFFFF','#77AADD','#4477AA'))
+corrplot(corrData3, method = 'shade', shade.col = NA, tl.col = 'black', 
+         type = 'upper', tl.srt = 45)
+```
+
+### Histogram of Volume, reveals outliers
+```{r, message=FALSE}
+ggplot(data = existing3, mapping = aes(x = Volume)) +
+  geom_histogram()
+```
+
+### Plotting Sales Volume by Product Type. Our company is interested in sales volume for PCs, Laptops, Netbooks, and Smartphones at this time
+```{r}
+ggplot(data = existing, aes(x = ProductType, y = Volume, fill = ProductType)) +
+  geom_bar(stat = 'identity') + 
+  guides(fill=FALSE) +
+  coord_flip()
+```
+
+### Plotting the impact '5StarReviews' have on Sales Volume. As you can see, it's a perfect correlation, which is impossible to sustain over time, thus why it was removed from modeling
+```{r, message=FALSE, warning=FALSE}
+ggplot(data=existing, aes(x=x5StarReviews, y=Volume)) + 
+  geom_point(aes(color=ProductType, size=2)) +
+  theme_bw() +
+  scale_x_continuous(trans = 'log2') + 
+  scale_y_continuous(trans = 'log2') +
+  geom_line() +
+  facet_wrap(~ProductType) + 
+  xlab('Number of 5 Star Reviews') +
+  ylab('Sales Volume') +
+  ggtitle('Effect of 5 Star Reviews on Sales Volume')
+```
+
+### Now plotting the impact of 4 Star Reviews on Sales Volume, showing high positive correlation
+```{r, message=FALSE, warning=FALSE}
+ggplot(data=existing, aes(x=x4StarReviews, y=Volume)) + 
+  geom_point(aes(color=ProductType, size=2)) +
+  theme_bw() +
+  scale_x_continuous(trans = 'log2') + 
+  scale_y_continuous(trans = 'log2') +
+  geom_line() +
+  facet_wrap(~ProductType) + 
+  xlab('Number of 4 Star Reviews') +
+  ylab('Sales Volume') +
+  ggtitle('Effect of 4 Star Reviews on Sales Volume')
+```
+
+### Now plotting impact of Positive Service Reviews on Sales Volume, also positive correlation
+```{r, message=FALSE, warning=FALSE}
+ggplot(data=existing, aes(x=PositiveServiceReview, y=Volume)) + 
+  geom_point(aes(color=ProductType, size=2)) +
+  theme_bw() +
+  scale_x_continuous(trans = 'log2') + 
+  scale_y_continuous(trans = 'log2') +
+  geom_line() +
+  facet_wrap(~ProductType) + 
+  xlab('Number of Positive Service Reviews') +
+  ylab('Sales Volume') +
+  ggtitle('Effect of Positive Service Reviews on Sales Volume')
+```
+
+## Modeling 
+### Creating data partition and setting cross validation. Two observations eventually were removed since they were outliers and not products of interest.
+```{r}
+set.seed(123)
+
+# CreateDataPartition() 75% and 25%
+index1 <- createDataPartition(existing3$Volume, p=0.75, list = FALSE)
+train1 <- existing3[ index1,]
+test1 <- existing3[-index1,]
+
+# Second iteration, removing 2 outlier rows #18 and #48 from test set, as they were both outliers and not products of interest of the retailer
+test1_rem_out <- test1[!rownames(test1) %in% c('18', '48'), ]
+
+# Checking structure of train1
+str(train1)
+
+# Setting cross validation
+control1 <- trainControl(method = 'repeatedcv',
+                         number = 10,
+                         repeats = 1)
+```
+
+## Random forest model and tuning
+```{r}
+# set seed
+set.seed(123)
+
+# Creating dataframe for manual tuning
+rfGrid <- expand.grid(mtry = c(2,3,4,5,6,7,8))
+
+rf1 <- train(Volume ~ x4StarReviews + PositiveServiceReview + x2StarReviews + x3StarReviews + 
+               x1StarReviews + NegativeServiceReview + Recommendproduct + ShippingWeight + Price,
+             data = train1,
+             method = 'rf',
+             trControl = control1,
+             tuneGrid = rfGrid)
+
+rf1
+```
+
+### Level of importance for variables in model
+```{r}
+ggplot(varImp(rf1, scale=FALSE)) +
+  geom_bar(stat = 'identity', fill = 'steelblue') +
+  ggtitle('Variable Importance of Random Forest 1 on Sales Volume')
+```
+
+### Predicting rf on test1. Note, a symmetrical pattern means a good residual plot!
+```{r}
+rf1Preds <- predict(rf1, newdata = test1_rem_out)
+summary(rf1Preds)
+```
+```{r}
+plot(rf1Preds)
+```
+
+### Running a postResample to test if it will do well on new data or if overfitting. Our Cross Validation R2 is .908 after tuning and feature selection, which is excellent. Our postResample R2 is even better, at .945. If cross validation was above 94-95%, it would be a red-flag for overfitting, but postResample in upper 90s means it will generalize well on new data (and is not overfitting).
+```{r}
+postResample(rf1Preds, test1_rem_out$Volume)
+```
+
+### CV RMSE=788, R2=.908
+### PostResample RMSE=190, R2=.945
+
+
+## Random Forest using feature selection
+```{r}
+set.seed(123)
+
+rf2 <- train(Volume ~ x4StarReviews + PositiveServiceReview + x2StarReviews,
+             data = train1,
+             method = 'rf',
+             trControl = control1)
+
+rf2
+```
+
+### Variable importance
+```{r}
+ggplot(varImp(rf2, scale=FALSE)) +
+  geom_bar(stat = 'identity', fill = 'steelblue') +
+  ggtitle('Variable Importance of Random Forest 2 on Sales Volume')
+```
+
+### Plotting the residuals against the actual values for Volume. The graph below shows a couple volume outliers, and further research reveals both outliers are for accessory product, which are not products of interest.
+```{r}
+resid_rf2 <- residuals(rf2)
+plot(train1$Volume, resid_rf2, 
+     xlab = 'Sales Volume', 
+     ylab = 'Residuals', 
+     main ='Predicted Sales Volume Residuals Plot',
+     abline(0,0))
+```
+
+### Predicting rf2 on test1. This is another excellent residual plot, showing our predictions are consistent with regression.
+```{r}
+rf2Preds <- predict(rf2, newdata = test1_rem_out)
+summary(rf2Preds)
+```
+```{r}
+plot(rf2Preds)
+```
+
+### postResample to test if it will do well on new data or if overfitting. It is even better than previous model (note: this is because we removed 2 outlier volumes from testSet, as indicated in DataPartition section above).
+```{r}
+postResample(rf2Preds, test1_rem_out$Volume)
+```
+### CV RMSE = 745, R2=.928
+### PostResample RMSE=153, R2=.972
+
+## The postResample R2 and RMSE for a regression model is EXCELLENT. This is our top model! Many iterations and algorithms were tried...as you can see in remaining document, but this model ended up being the best.
+
+
+### Random Forest using feature selection
+```{r}
+set.seed(123)
+
+rf3 <- train(Volume ~ x4StarReviews + PositiveServiceReview + x3StarReviews,
+             data = train1,
+             method = 'rf',
+             trControl = control1)
+
+rf3
+```
+
+### Variable importance
+```{r}
+ggplot(varImp(rf3, scale=FALSE)) +
+  geom_bar(stat = 'identity', fill = 'steelblue') +
+  ggtitle('Variable Importance of Random Forest 3 on Sales Volume')
+```
+
+### Predicting rf3 on test1
+```{r}
+rf3Preds <- predict(rf3, newdata = test1_rem_out)
+summary(rf3Preds)
+```
+
+### postResample to test if it will do well on new data or if overfitting. Another excellent model.
+```{r}
+postResample(rf3Preds, test1_rem_out$Volume)
+```
+
+### CV RMSe=648, R2=.934
+### PostResample RMSE=167, R2=.954
+
+
+## Random Forest using feature selection
+```{r}
+set.seed(123)
+rf4 <- train(Volume ~ x4StarReviews + PositiveServiceReview + x3StarReviews + x2StarReviews + 
+               x1StarReviews + NegativeServiceReview,
+             data = train1,
+             method = 'rf',
+             trControl = control1)
+
+rf4
+```
+
+### Variable importance using ggplot
+```{r}
+ggplot(varImp(rf4, scale=FALSE)) +
+  geom_bar(stat = 'identity', fill = 'steelblue') +
+  ggtitle('Variable Importance of Random Forest 4 on Sales Volume')
+```
+
+### Plotting the residuals against the actual values for Volume. Again, graph shows outlier.
+```{r}
+resid_rf4 <- residuals(rf4)
+plot(train1$Volume, resid_rf4, xlab = 'Sales Volume', ylab = 'Residuals', 
+     main='Predicted Sales Volume Residuals Plot',
+     abline(0,0))
+```
+
+### Predicting rf4 on test1
+```{r}
+rf4Preds <- predict(rf4, newdata = test1_rem_out)
+summary(rf4Preds)
+```
+
+### postResample to test if it will do well on new data or if overfitting
+```{r}
+postResample(rf4Preds, test1_rem_out$Volume)
+```
+
+### CV RMSE=783, R2=.909
+### RMSE=177, R2=.952
+
+
+## Support Vector Machines -- RBF Kernel
+```{r}
+set.seed(123)
+
+# Creating dataframe for manual tuning
+rbfGrid <- expand.grid(sigma = c(.01, .015, .2),
+                       C = c(10, 100, 1000))
+
+rbf1 <- train(Volume ~ x4StarReviews + x3StarReviews + PositiveServiceReview,
+              data = train1,
+              method = 'svmRadial',
+              trControl = control1,
+              tuneGrid = rbfGrid,
+              preProc = c('center','scale'))
+
+rbf1
+```
+
+### Predicting rbf on test1
+```{r}
+rbf1Preds <- predict(rbf1, newdata = test1_rem_out)
+summary(rbf1Preds)
+```
+
+### postResample to test if it will do well on new data or if overfitting
+```{r}
+postResample(rbf1Preds, test1_rem_out$Volume)
+```
+
+### CV RMSE=879, R2=.919
+### PostResample RMSE=264, R2=.815
+
+
+## Support Vector Machines -- RBF Kernel feature selection
+```{r}
+set.seed(123)
+
+# Creating dataframe for manual tuning
+rbfGrid <- expand.grid(sigma = c(.01, .015, .2),
+                       C = c(10, 100, 1000))
+
+rbf2 <- train(Volume ~ x4StarReviews + PositiveServiceReview + x2StarReviews,
+              data = train1,
+              method = 'svmRadial',
+              trControl = control1,
+              tuneGrid = rbfGrid,
+              preProc = c('center','scale'))
+
+rbf2
+```
+
+### Predicting rbf2 on test1
+```{r}
+rbf2Preds <- predict(rbf2, newdata = test1_rem_out)
+summary(rbf2Preds)
+```
+
+```{r}
+# postResample to test if it will do well on new data or if overfitting
+postResample(rbf2Preds, test1_rem_out$Volume)
+```
+
+### CV RMSE=657, R2=.909
+### PostResample RMSE=420, R2=.704 
+### Negative predictions, move on
+
+
+## Support Vector Machines -- Linear
+```{r}
+set.seed(123)
+
+### Creating dataframe for manual tuning
+linearGrid <- expand.grid(C = c(1, 10, 100, 1000))
+
+linear1 <- train(Volume ~ x4StarReviews + x3StarReviews + PositiveServiceReview,
+                 data = train1,
+                 method = 'svmLinear',
+                 trControl = control1,
+                 tuneGrid = linearGrid,
+                 preProc = c('center','scale'))
+
+linear1
+```
+
+### Predicting rbf on test1
+```{r}
+linearPreds <- predict(linear1, newdata = test1_rem_out)
+summary(linearPreds)
+```
+
+### postResample to test if it will do well on new data or if overfitting
+```{r}
+lin_PR <- postResample(linearPreds, test1_rem_out$Volume)
+```
+
+### CV RMSE=843, R2=.858
+### PR RMSE=462, R2=.583
+### Negative predictions, move on
+
+
+## SVM -- Linear, changing features
+```{r}
+set.seed(123)
+
+# Creating dataframe for manual tuning
+linearGrid <- expand.grid(C = c(1, 10, 100, 1000))
+
+linear2 <- train(Volume ~ x4StarReviews + x3StarReviews + PositiveServiceReview + 
+                   NegativeServiceReview + Price,
+                 data = train1,
+                 method = 'svmLinear',
+                 trControl = control1,
+                 tuneGrid = linearGrid,
+                 preProc = c('center','scale'))
+
+linear2
+```
+
+```{r}
+# Predicting rbf on test1
+linear2Preds <- predict(linear2, newdata = test1_rem_out)
+summary(linear2Preds)
+```
+
+### postResample to test if it will do well on new data or if overfitting
+```{r}
+postResample(linear2Preds, test1_rem_out$Volume)
+```
+
+### RMSE=1120, R2=56.9
+### Negative predictions, move on
+
+
+## Support Vector Machines -- Polynomial
+```{r}
+set.seed(123)
+
+# Creating dataframe for manual tuning
+polyGrid <- expand.grid(degree = c(2,3,4),
+                        scale = c(1,2),
+                        C = c(.1, 1, 10, 100))
+
+poly1 <- train(Volume ~ x4StarReviews + x3StarReviews + PositiveServiceReview,
+               data = train1,
+               method = 'svmPoly',
+               trControl = control1,
+               tuneGrid = polyGrid,
+               preProc = c('center','scale'))
+
+poly1
+```
+
+### Predicting rbf on test1
+```{r}
+polyPreds <- predict(poly1, newdata = test1_rem_out)
+summary(polyPreds)
+```
+
+### postResample to test if it will do well on new data or if overfitting
+```{r}
+postResample(polyPreds, test1_rem_out$Volume)
+```
+
+### RMSE=688, R2=60.2
+### Negative predictions, move on
+
+
+## SVM -- Polynomial
+```{r}
+set.seed(123)
+
+# Creating dataframe for manual tuning
+polyGrid <- expand.grid(degree = c(2,3,4),
+                        scale = c(1,2),
+                        C = c(.1, 1, 10, 100))
+
+poly2 <- train(Volume ~ x4StarReviews + x2StarReviews + PositiveServiceReview + 
+                 NegativeServiceReview,
+               data = train1,
+               method = 'svmPoly',
+               trControl = control1,
+               tuneGrid = polyGrid,
+               preProc = c('center','scale'))
+
+poly2
+```
+
+### Predicting rbf on test1
+```{r}
+poly2Preds <- predict(poly2, newdata = test1_rem_out)
+summary(poly2Preds)
+```
+
+### postResample to test if it will do well on new data or if overfitting
+```{r}
+postResample(poly2Preds, test1_rem_out$Volume)
+```
+
+### RMSE=402, R2=0.57
+
+
+## Gradient Boosting using feature selection
+```{r, message=FALSE, results='hide'}
+set.seed(123)
+
+gbm1 <- train(Volume ~ x4StarReviews + x2StarReviews + PositiveServiceReview,
+              data = train1,
+              method = 'gbm',
+              trControl = control1,
+              preProc = c('center','scale'))
+```
+
+```{r}
+gbm1
+```
+
+### Predicting gbm on test1
+```{r}
+gbmPreds <- predict(gbm1, newdata = test1_rem_out)
+summary(gbmPreds)
+```
+
+### postResample to test if it will do well on new data or if overfitting
+```{r}
+postResample(gbmPreds, test1_rem_out$Volume)
+```
+
+### CV RMSE=1010, R2=.858
+### PostResample RMSE=266, R2=.911 
+
+
+## Gradient Boosting feature selection
+```{r, warnings=FALSE, results='hide'}
+set.seed(123)
+
+gbm2 <- train(Volume ~ x4StarReviews + x3StarReviews + PositiveServiceReview,
+              data = train1,
+              method = 'gbm',
+              trControl = control1,
+              preProc = c('center','scale'))
+```
+```{r}
+gbm2
+```
+
+### Predicting gbm2 on test1
+```{r}
+gbm2Preds <- predict(gbm2, newdata = test1_rem_out)
+summary(gbm2Preds)
+```
+
+### postResample to test if it will do well on new data or if overfitting
+```{r}
+postResample(gbm2Preds, test1_rem_out$Volume)
+```
+
+### CV RMSE=813, R2=.962 
+### PostResample RMSE=415, R2=.706 
+
+
+## Bayesian Ridge Regression, L1
+```{r, results='hide'}
+set.seed(123)
+
+bay1 <- train(Volume ~ x4StarReviews + PositiveServiceReview + x2StarReviews,
+              data = train1,
+              method = 'blassoAveraged',
+              trControl = control1,
+              preProc = c('center','scale'))
+
+bay1
+```
+
+### Predicting bay1 on test1
+```{r}
+bay1Preds <- predict(bay1, newdata = test1_rem_out)
+summary(bay1Preds)
+```
+
+### postResample to test if it will do well on new data or if overfitting
+```{r, warning=FALSE}
+postResample(bay1Preds, test1$Volume)
+```
+
+### Negative predictions regardless of feature selection, high RMSE, doesn't work with this task
+### CV RMSE=1148, R2=.753
+
+### After deleting problem outlier rows in test set - 17 observations
+```{r}
+Actual_vs_Predicted_NoOutlier <- data.frame(test1_rem_out %>% select(ProductNum, Volume), 
+                                            rf1Preds, rf2Preds, rf3Preds, rf4Preds, rbf1Preds,
+                                            rbf2Preds, linearPreds, linear2Preds, polyPreds,
+                                            poly2Preds, gbmPreds, gbm2Preds)
+
+#### Exporting to excel
+write.xlsx(Actual_vs_Predicted_NoOutlier, file = "Actual_vs_Predicted_NoOutlier.xlsx", row.names=TRUE)
+```
+
+## Using Top Model rf2 algorithm to make predictions on new product data
+### New data frame must be prepared the same way as training data set
+### Target variable: 'Volume' for PC, Laptops, Netbooks, and Smartphones product types
+
+### Importing data
+```{r}
+new <- read.csv(file.path('C:/Users/jlbro/OneDrive/C3T3', 'new.csv'), stringsAsFactors = TRUE)
+```
+
+### Checking structure
+```{r}
+str(new)
+```
+
+### Making new dataframe same column wise as trained dataframes
+```{r}
+newDummy <- dummyVars(' ~ .', data = new)
+```
+
+```{r}
+new2 <- data.frame(predict(newDummy, newdata = new))
+```
+
+### Checking structure again
+```{r}
+str(new2)
+```
+```{r, results='hide'}
+new2$BestSellersRank <- NULL
+
+str(new2)
+```
+```{r, results='hide'}
+new3 <- subset(new2, select = -c(1:4, 8:9, 11:12, 15, 24:27))
+
+str(new3)
+```
+
+### Predicting rf2 on 'new3' product data set
+```{r}
+set.seed(123)
+
+Predicted_Volume <- predict(rf2, newdata = new3)
+```
+
+### Adding our predictions to the 'new' product dataframe
+```{r}
+Preds_rf2_df <- data.frame(new3 %>% select(ProductType.Laptop, ProductType.Netbook, ProductType.PC, ProductType.Smartphone, ProductNum, Volume), Predicted_Volume) 
+
+TopModelPreds <- read.xlsx(file.path('C:/Users/jlbro/OneDrive/C3T3-3', 'newPreds_TopModel_rf2.xlsx'))
+```
+
+
+## Sales predictions ('Predicted_Volume') on the new data set provided by the client.
+```{r}
+kable(TopModelPreds) %>% 
+  kable_styling(bootstrap_options = c('striped','hover'))
+```
+### As you can see, the predictions have decimals. That's because this is a regression problem with continuous numbers. We can simply round after exporting to Excel. I also show 'x4StarReviews' since it was the most important variable and products not of interest by client (accessories, game consoles, printers, etc.) were removed.
+
+### In this project, multiple algorithms were trained and tested ofor the client. Feature selection via filter method and model tuning were utilized to select the optimal model, Random Forest 2, which achieved 97% post-resample accuracy on test set. Assessment of Star Reviews and Service Reviews revealed an overall dose-response positive relationship to Sales Volume for most products. Predicted results on new data set for products of interest were obtained.
